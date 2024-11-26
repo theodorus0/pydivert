@@ -13,6 +13,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+import asyncio
 import subprocess
 import sys
 from ctypes import byref, c_uint64, c_uint, c_char, c_char_p
@@ -200,6 +201,13 @@ class WinDivert(object):
             (address.IfIdx, address.SubIfIdx),
             Direction(address.Direction)
         )
+    async def recv_async(self, bufsize=DEFAULT_PACKET_BUFFER_SIZE):
+        """
+        Asynchronous wrapper for recv()
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.recv, bufsize)
+
 
     def send(self, packet, recalculate_checksum=True):
         """
@@ -236,6 +244,14 @@ class WinDivert(object):
         windivert_dll.WinDivertSend(self._handle, buff, len(packet.raw), byref(packet.wd_addr),
                                     byref(send_len))
         return send_len
+
+    async def send_async(self, packet, recalculate_checksum=True):
+        """
+        Asynchronous wrapper for send()
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.send, packet, recalculate_checksum)
+
 
     def get_param(self, name):
         """
