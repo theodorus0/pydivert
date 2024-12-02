@@ -13,13 +13,13 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-import asyncio
 import subprocess
 import sys
 from ctypes import byref, c_uint64, c_uint, c_char, c_char_p
 
 from pydivert import windivert_dll
 from pydivert.consts import Layer, Direction, Flag
+from pyoverlapped import perform_overlapped_operation
 from pydivert.packet import Packet
 from pydivert.util import PY2
 
@@ -201,13 +201,47 @@ class WinDivert(object):
             (address.IfIdx, address.SubIfIdx),
             Direction(address.Direction)
         )
+
     async def recv_async(self, bufsize=DEFAULT_PACKET_BUFFER_SIZE):
         """
-        Asynchronous wrapper for recv()
-        """
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.recv, bufsize)
+        Asynchronously receives a diverted packet that matched the filter.
 
+        The remapped function is WinDivertRecvEx::
+
+            BOOL WinDivertRecvEx(
+                __in HANDLE handle,
+                __out PVOID pPacket,
+                __in UINT packetLen,
+                __in UINT64 flags,
+                __out_opt PWINDIVERT_ADDRESS pAddr,
+                __out_opt UINT *recvLen,
+                __inout_opt LPOVERLAPPED lpOverlapped
+            );
+
+        For more info on the C call visit: http://reqrypt.org/windivert-doc.html#divert_recv_ex
+        """
+        if self._handle is None:
+            raise RuntimeError("WinDivert handle is not open")
+
+        packet = bytearray(bufsize)
+        packet_ = (c_char * bufsize).from_buffer(packet)
+        address = windivert_dll.WinDivertAddress()
+        recv_len = c_uint(0)
+
+        f = lambda lpovl: windivert_dll.WinDivertRecvEx(self._handle,
+                                                        packet_,
+                                                        bufsize,
+                                                        0,
+                                                        byref(address),
+                                                        byref(recv_len),
+                                                        lpovl)
+
+        await perform_overlapped_operation(self._handle, byref(recv_len), f)
+        return Packet(
+            memoryview(packet)[:recv_len.value],
+            (address.IfIdx, address.SubIfIdx),
+            Direction(address.Direction)
+        )
 
     def send(self, packet, recalculate_checksum=True):
         """
@@ -247,11 +281,48 @@ class WinDivert(object):
 
     async def send_async(self, packet, recalculate_checksum=True):
         """
-        Asynchronous wrapper for send()
-        """
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.send, packet, recalculate_checksum)
+        Asynchronously injects a packet into the network stack.
+        Recalculates the checksum before sending unless recalculate_checksum=False is passed.
 
+        The injected packet may be one received from recv(), or a modified version, or a completely new packet.
+        Injected packets can be captured and diverted again by other WinDivert handles with lower priorities.
+
+        The remapped function is WinDivertSendEx::
+
+            BOOL WinDivertSendEx(
+                __in HANDLE handle,
+                __in PVOID pPacket,
+                __in UINT packetLen,
+                __in UINT64 flags,
+                __in PWINDIVERT_ADDRESS pAddr,
+                __out_opt UINT *sendLen,
+                __inout_opt LPOVERLAPPED lpOverlapped
+            );
+
+        For more info on the C call visit: http://reqrypt.org/windivert-doc.html#divert_send_ex
+
+        :return: The return value is the number of bytes actually sent.
+        """
+        if recalculate_checksum:
+            packet.recalculate_checksums()
+
+        send_len = c_uint(0)
+        if PY2:
+            # .from_buffer(memoryview) does not work on PY2
+            buff = bytearray(packet.raw)
+        else:
+            buff = packet.raw
+        buff_ = (c_char * len(packet.raw)).from_buffer(buff)
+
+        f = lambda povl: windivert_dll.WinDivertSendEx(self._handle,
+                                      buff_,
+                                      len(packet.raw),
+                                      0,
+                                      byref(packet.wd_addr),
+                                      byref(send_len),
+                                      povl)
+        await perform_overlapped_operation(self._handle, byref(send_len), f)
+        return send_len
 
     def get_param(self, name):
         """
